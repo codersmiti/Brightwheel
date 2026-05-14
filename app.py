@@ -41,12 +41,23 @@ def triage():
             result["is_followup"] = True
             result["original_message_id"] = followup["original_message_id"]
             result["original_subject"] = followup["original_subject"]
-            # Elevate priority and routing for follow-ups
+            
+            # Find the original message and carry forward its category and owner
+            original = next((m for m in MESSAGES if str(m.get("message_id", "")) == followup["original_message_id"]), None)
+            
+            if original:
+                # Re-triage the original message to get its category and owner
+                original_body = str(original.get("body", ""))
+                original_subject = str(original.get("subject", ""))
+                original_result = triage_message(f"Subject: {original_subject}\n\n{original_body}", sender_name)
+                result["category"] = original_result["category"]
+                result["owner"] = original_result["owner"]
+                result["supporting_team"] = original_result["supporting_team"]
+            
+            # Always bump priority for follow-ups that haven't been responded to
             if result.get("priority") not in ("Critical", "High"):
                 result["priority"] = "High"
-                result["sla"] = SLA_BY_PRIORITY["High"]
-            result["category"] = "Account Management"
-            result["owner"] = "Account Manager"
+        result["sla"] = SLA_BY_PRIORITY["High"]
     else:
         result["is_followup"] = False
 
