@@ -1,16 +1,22 @@
 from flask import Flask, request, jsonify, render_template
-from triage import triage_message, calculate_weekly_impact
+from triage import triage_message, calculate_weekly_impact, detect_followup, SLA_BY_PRIORITY
 import pandas as pd
 import os
+import time
 
 app = Flask(__name__, static_folder='static')
+
 def load_messages():
     try:
-        df = pd.read_excel("data/AI Automation Builder Exercise CSV Data.xlsx")        
+        df = pd.read_excel("data/AI Automation Builder Exercise CSV Data.xlsx")
         df = df.fillna("")
         return df.to_dict(orient="records")
     except Exception as e:
+        print(f"Could not load messages: {e}")
         return []
+
+# Load once at startup — used for follow-up detection
+MESSAGES = load_messages()
 
 @app.route("/")
 def index():
@@ -27,6 +33,23 @@ def triage():
         return jsonify({"error": "No message provided"}), 400
 
     result = triage_message(message, sender_name, sender_email)
+
+    # Follow-up detection — checks sender email against loaded dataset
+    if sender_email:
+        followup = detect_followup(message, sender_email, MESSAGES)
+        if followup:
+            result["is_followup"] = True
+            result["original_message_id"] = followup["original_message_id"]
+            result["original_subject"] = followup["original_subject"]
+            # Elevate priority and routing for follow-ups
+            if result.get("priority") not in ("Critical", "High"):
+                result["priority"] = "High"
+                result["sla"] = SLA_BY_PRIORITY["High"]
+            result["category"] = "Account Management"
+            result["owner"] = "Account Manager"
+    else:
+        result["is_followup"] = False
+
     result["weekly_impact"] = calculate_weekly_impact()
     return jsonify(result)
 
@@ -34,10 +57,10 @@ def triage():
 def batch():
     messages = load_messages()
     if not messages:
-        return jsonify({"error": "Could not load CSV"}), 500
+        return jsonify({"error": "Could not load Excel"}), 500
 
     results = []
-    for msg in messages:
+    for i, msg in enumerate(messages):
         body = str(msg.get("body", ""))
         sender = str(msg.get("sender_name", "there"))
         email = str(msg.get("sender_email", ""))
@@ -51,18 +74,10 @@ def batch():
         result["received_at"] = str(msg.get("received_at", ""))
         results.append(result)
 
-    return jsonify(results)
+        if (i + 1) % 14 == 0:
+            time.sleep(60)
 
-@app.route("/debug")
-def debug():
-    try:
-        df = pd.read_excel("data/AI Automation Builder Exercise CSV Data.xlsx")
-        return jsonify({
-            "columns": list(df.columns),
-            "first_row": df.iloc[0].to_dict() if len(df) > 0 else {}
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)})
+    return jsonify(results)
 
 @app.route("/impact", methods=["GET"])
 def impact():

@@ -711,7 +711,17 @@
     }
 
     document.getElementById('draft-reply-text').textContent = data.draft_reply || '';
+    // Follow-up detection banner
+    const existingFollowup = document.getElementById('followup-banner');
+    if (existingFollowup) existingFollowup.remove();
 
+    if (data.is_followup) {
+        const followupDiv = document.createElement('div');
+        followupDiv.id = 'followup-banner';
+        followupDiv.style.cssText = 'background:#fff7ed;border:1.5px solid #fed7aa;border-radius:8px;padding:0.75rem 1rem;margin-bottom:1rem;font-size:0.85rem;color:#92400e;';
+        followupDiv.innerHTML = `🔁 <strong>Follow-up detected</strong> — linked to ${data.original_message_id}: "${data.original_subject}"`;
+        document.getElementById('priority-banner').insertAdjacentElement('afterend', followupDiv);
+    }
     document.getElementById('result-panel').style.display = 'block';
     document.getElementById('result-placeholder').style.display = 'none';
   }

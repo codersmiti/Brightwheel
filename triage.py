@@ -132,6 +132,8 @@ DRAFT REPLY RULES:
 - Do NOT say the issue is solved.
 - For Critical issues, mention follow-up within 1 hour.
 - Sign off exactly as: Brightwheel Onboarding Team
+- If the message is a follow-up (contains "following up", "any update", "haven't heard back"), acknowledge the wait, apologize briefly, and give a specific timeframe matching the SLA. Do NOT say "2 business days" — use the exact SLA for the priority level.
+
 
 Return ONLY valid JSON. No markdown fences. No explanation outside the JSON.
 """
@@ -396,7 +398,7 @@ def call_llm(prompt: str) -> str:
     response = client.chat.completions.create(
         model=MODEL_NAME,
         messages=[
-            {"role": "system", "content": "You are a precise Brightwheel onboarding triage assistant. Return valid JSON only."},
+            {"role": "system", "content": "You are a precise Brightwheel onboarding triage assistant. Return valid JSON only. Never contradict the SLA in the draft reply. If priority is High, reply timeframe must be same business day. If priority is Critical, reply timeframe must be within 1 hour. If priority is Medium, reply timeframe must be within 24 hours. If priority is Low, reply timeframe must be within 48 hours."},
             {"role": "user", "content": prompt},
         ],
         temperature=0.1,
@@ -476,10 +478,13 @@ def post_process(result: dict, message_body: str, sender_name: str = "there") ->
     draft = result.get("draft_reply", "") or ""
     if (
         not draft.strip()
-        or len(draft.split()) > 60
+        or len(draft.split()) > 90
         or _is_hallucinated_instruction(draft)
         or (priority == "Critical" and "24 hours" in draft.lower())
         or (priority == "Critical" and "1 hour" not in draft.lower())
+        or (priority == "High" and "2 business days" in draft.lower())
+        or (priority == "High" and "48 hours" in draft.lower())
+
     ):
         result["draft_reply"] = make_reply(category, priority, owner, sender_name, result.get("supporting_team"))
 
@@ -491,6 +496,28 @@ def post_process(result: dict, message_body: str, sender_name: str = "there") ->
     result.pop("error", None)
     return result
 
+def detect_followup(message_body: str, sender_email: str, messages: list) -> dict | None:
+    """
+    Detects if a message is a follow-up to a previous one.
+    Matches follow-up language AND sender email against known messages.
+    Note: works for dataset messages loaded at startup.
+    Production would require persistent storage for new messages.
+    """
+    followup_patterns = r"following up|follow up|just checking|any update|heard back|haven't heard|no response|still waiting|checking in|following up on"
+
+    if not _contains(message_body, followup_patterns):
+        return None
+
+    previous = [m for m in messages if str(m.get("sender_email", "")).strip().lower() == sender_email.strip().lower()]
+
+    if not previous:
+        return None
+
+    return {
+        "is_followup": True,
+        "original_message_id": str(previous[0].get("message_id", "")),
+        "original_subject": str(previous[0].get("subject", ""))
+    }
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
