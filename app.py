@@ -63,32 +63,33 @@ def triage():
 
     result["weekly_impact"] = calculate_weekly_impact()
     return jsonify(result)
-
 @app.route("/batch", methods=["GET"])
 def batch():
-    messages = load_messages()
-    if not messages:
-        return jsonify({"error": "Could not load Excel"}), 500
+    try:
+        messages = load_messages()
+        if not messages:
+            return jsonify({"error": "Could not load Excel — file may be missing or wrong name"}), 500
 
-    results = []
-    for i, msg in enumerate(messages):
-        body = str(msg.get("body", ""))
-        sender = str(msg.get("sender_name", "there"))
-        email = str(msg.get("sender_email", ""))
-        subject = str(msg.get("subject", ""))
-        full_message = f"Subject: {subject}\n\n{body}"
+        results = []
+        for i, msg in enumerate(messages):
+            body = str(msg.get("body", ""))
+            sender = str(msg.get("sender_name", "there"))
+            email = str(msg.get("sender_email", ""))
+            subject = str(msg.get("subject", ""))
+            full_message = f"Subject: {subject}\n\n{body}"
 
-        result = triage_message(full_message, sender, email)
-        result["message_id"] = msg.get("message_id")
-        result["sender_name"] = sender
-        result["subject"] = subject
-        result["received_at"] = str(msg.get("received_at", ""))
-        results.append(result)
+            result = triage_message(full_message, sender, email)
+            result["message_id"] = msg.get("message_id")
+            result["sender_name"] = sender
+            result["subject"] = subject
+            result["received_at"] = str(msg.get("received_at", ""))
+            results.append(result)
 
-        if (i + 1) % 14 == 0:
-            time.sleep(60)
+            time.sleep(3)
 
-    return jsonify(results)
+        return jsonify(results)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/impact", methods=["GET"])
 def impact():
