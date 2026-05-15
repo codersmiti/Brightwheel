@@ -57,7 +57,9 @@ def triage():
             # Always bump priority for follow-ups that haven't been responded to
             if result.get("priority") not in ("Critical", "High"):
                 result["priority"] = "High"
-        result["sla"] = SLA_BY_PRIORITY["High"]
+            result["sla"] = SLA_BY_PRIORITY["High"]
+        else:
+            result["is_followup"] = False
     else:
         result["is_followup"] = False
 

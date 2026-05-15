@@ -15,6 +15,7 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MODEL_NAME = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 USE_AI = os.getenv("USE_AI", "true").lower() == "true"
+DEBUG_LLM = os.getenv("DEBUG_LLM", "false").lower() == "true"
 LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "12"))
 
 client = OpenAI(
@@ -73,7 +74,7 @@ safe_mode, draft_reply, issues_detected, weekly_impact.
 
 CATEGORIES:
 - Setup & Onboarding   : adding teachers, rosters, classrooms, setup how-to questions
-- Technical Issue      : login errors, invitations, tablets, QR codes, app crashes
+- Technical Issue      : login errors, invitations, tablets, QR codes, app crashes, trouble logging in
 - Billing & Accounts   : invoices, charges, payments, plan upgrades, billing questions
 - Privacy & Security   : wrong child visible, unauthorized access, child data exposure
 - Wrong Team           : sales/demo/pricing prospects, job applications, unrelated
@@ -90,6 +91,7 @@ PRIORITY:
 SCOPE RULE for Technical Issues:
 - One device or one user, others fine -> Medium
 - All devices / all users / blocking launch -> High or Critical
+
 CRITICAL ROUTING RULES — NEVER VIOLATE:
 - "Billing & Accounts" category MUST route to "Billing Team" — never "Account Manager"
 - "Account Management" category MUST route to "Account Manager" — never "Billing Team"
@@ -100,12 +102,13 @@ CRITICAL ROUTING RULES — NEVER VIOLATE:
 - "Technical Issue" MUST route to "Technical Support" unless priority is Critical
 - "Setup & Onboarding" MUST route to "Onboarding Specialist"
 - "Feature Question" MUST route to "Onboarding Specialist"
-- "Wrong Team" sales → "Sales Team", jobs → "HR Team"
-- Critical priority → owner MUST be "Escalation Manager" always
+- "Wrong Team" sales -> "Sales Team", jobs -> "HR Team"
+- Critical priority -> owner MUST be "Escalation Manager" always
+
 ROUTING:
 - Critical -> owner must be Escalation Manager
 - If owner is Escalation Manager, supporting_team must be the functional team:
-  Technical Issue -> Technical Support
+  MAKE SURE Technical Issue -> Technical Support
   Privacy & Security -> Security Team
   Billing & Accounts -> Billing Team
   Setup & Onboarding / Urgent Escalation -> Onboarding Specialist
@@ -132,8 +135,7 @@ DRAFT REPLY RULES:
 - Do NOT say the issue is solved.
 - For Critical issues, mention follow-up within 1 hour.
 - Sign off exactly as: Brightwheel Onboarding Team
-- If the message is a follow-up (contains "following up", "any update", "haven't heard back"), acknowledge the wait, apologize briefly, and give a specific timeframe matching the SLA. Do NOT say "2 business days" — use the exact SLA for the priority level.
-
+- If the message is a follow-up (contains "following up", "any update", "haven't heard back"), acknowledge the wait briefly and give a specific timeframe matching the SLA. Do NOT say "2 business days".
 
 Return ONLY valid JSON. No markdown fences. No explanation outside the JSON.
 """
@@ -142,12 +144,18 @@ Return ONLY valid JSON. No markdown fences. No explanation outside the JSON.
 # Text helpers
 # ---------------------------------------------------------------------------
 
+def _debug(*args):
+    """Print only when DEBUG_LLM=true."""
+    if DEBUG_LLM:
+        print(*args, flush=True)
+
+
 def _contains(text: str, pattern: str) -> bool:
     return bool(re.search(pattern, text, flags=re.IGNORECASE))
 
 
 def detect_issues(message: str) -> list:
-    """Detects issue signals for explainability and multi-issue logic."""
+    """Detects issue signals for explainability and fallback logic."""
     text = message.lower()
     patterns = [
         (r"wrong child|another family|another child|not hers|not his|privacy|unauthorized|child data", "Possible privacy/security exposure"),
@@ -169,7 +177,7 @@ def detect_issues(message: str) -> list:
 
 
 def infer_secondary(text: str, primary: str) -> str | None:
-    """Infers a secondary category for multi-issue messages."""
+    """Infers a secondary category for fallback only."""
     candidates = []
     if _contains(text, r"invoice|billing|charge|payment|amount doesn't match|amount does not match|charged twice|double charge"):
         candidates.append("Billing & Accounts")
@@ -269,7 +277,7 @@ def make_reply(category: str, priority: str, owner: str,
     if category in ("Setup & Onboarding", "Feature Question") and priority == "Low":
         return (
             f"{g} thanks for reaching out. We are routing this to an Onboarding Specialist who can help with your setup or product question. "
-            "Expected response: Respond within 48 hours.\n\n"
+            "They will respond within 48 hours.\n\n"
             "Brightwheel Onboarding Team"
         )
 
@@ -287,11 +295,11 @@ def make_reply(category: str, priority: str, owner: str,
     )
 
 # ---------------------------------------------------------------------------
-# Rule-based triage
+# Rule-based triage: used ONLY when Groq fails or USE_AI=false
 # ---------------------------------------------------------------------------
 
 def rule_based_triage(message_body: str, sender_name: str = "there", error: str | None = None) -> dict:
-    """Deterministic fallback and safety guardrail for high-stakes routing."""
+    """Deterministic fallback when Groq is unavailable or disabled."""
     text = message_body.lower()
     issues = detect_issues(message_body)
 
@@ -302,54 +310,42 @@ def rule_based_triage(message_body: str, sender_name: str = "there", error: str 
 
     if _contains(text, r"resume|job|interview|applying|teacher assistant") and not _contains(text, r"onboarding|billing|invoice|login|setup|contract"):
         category, priority, owner, confidence = "Wrong Team", "Low", "HR Team", 0.92
-
     elif _contains(text, r"demo|pricing") and not _contains(text, r"signed|contract|invoice|billing|customer"):
         category, priority, owner, confidence = "Wrong Team", "Low", "Sales Team", 0.92
-
     elif _contains(text, r"wrong child|another family|another child|not hers|not his|privacy|unauthorized|child data"):
         category, priority, owner, confidence = "Privacy & Security", "Critical", "Escalation Manager", 0.93
-
     elif (_contains(text, r"school starts monday|opens tomorrow|open in 3 days|school opens|open tomorrow|starts in two days")
           and _contains(text, r"no one has contacted|haven't heard|have not heard|still have not been contacted|not set up|no setup|nothing is set up|not added staff|not added.*classrooms|not added.*families")):
         category, priority, owner, confidence = "Urgent Escalation", "Critical", "Escalation Manager", 0.90
-
     elif (_contains(text, r"opens tomorrow|open in 3 days|school opens|school starts|starts monday|open tomorrow|open on friday|orientation tomorrow")
           and _contains(text, r"cannot log in|can't log in|unable to log in|stuck on loading|cannot check in|cannot message|nothing is working|invite|invitation|qr code|spinning|none of our parents")):
         category, priority, owner, confidence = "Technical Issue", "Critical", "Escalation Manager", 0.90
-
     elif _contains(text, r"all .*tablet|every single .*tablet|cannot check in|cannot message|system down|none of our parents"):
         category, priority, owner, confidence = "Technical Issue", "Critical", "Escalation Manager", 0.88
-
     elif _contains(text, r"director.*friday|leaves.*friday|departure is friday|transfer ownership|transfer admin access|account owner"):
         category, priority, owner, confidence = "Account Management", "High", "Account Manager", 0.86
-
     elif _contains(text, r"invoice|billing|charge|payment|amount doesn't match|amount does not match|charged twice|double charge"):
         priority = "High" if _contains(text, r"amount doesn't match|amount does not match|charged twice|double charge|dispute|contract") else "Medium"
         confidence = 0.84 if priority == "High" else 0.82
         category, owner = "Billing & Accounts", "Billing Team"
         if _contains(text, r"classroom|ratio|setup|go live|go-live|roster|upload"):
             category, owner = "Setup & Onboarding", "Onboarding Specialist"
-
     elif _contains(text, r"cannot log in|can't log in|unable to log in|stuck on loading|crash|tablet|invite|invitation|qr code|spinning"):
         single_scope = _contains(text, r"one of our|one parent|one teacher|director's ipad|her ipad|his ipad|one device|one staff|one user|my ipad")
         category = "Technical Issue"
         priority = "Medium" if single_scope else "High"
         owner = "Technical Support"
         confidence = 0.78 if single_scope else 0.80
-
     elif _contains(text, r"export|customize|enable|feature|personalize"):
         category, priority, owner, confidence = "Feature Question", "Low", "Onboarding Specialist", 0.78
-
     elif _contains(text, r"add teachers|teaching staff|classroom|roster|setup"):
         category, priority, owner, confidence = "Setup & Onboarding", "Low", "Onboarding Specialist", 0.82
-
     elif _contains(text, r"having some problems|having some issues|need assistance|earliest convenience"):
         category, priority, owner, confidence = "Setup & Onboarding", "Medium", "Onboarding Specialist", 0.35
 
     secondary = infer_secondary(text, category)
     if len(issues) >= 3 and priority not in ("Critical", "High"):
         priority = "High"
-
     if priority == "Critical":
         owner = "Escalation Manager"
 
@@ -383,7 +379,9 @@ def rule_based_triage(message_body: str, sender_name: str = "there", error: str 
         "weekly_impact": None,
         "pii_masked": True,
         "original_sender": sender_name,
-        "automation_mode": "Rules-assisted" if error or not USE_AI else "Rules-only",
+        "automation_mode": "Rules-assisted fallback" if error else "Rules-only",
+        "llm_used": False,
+        **({"debug_error": error} if error and DEBUG_LLM else {}),
     }
 
 # ---------------------------------------------------------------------------
@@ -395,15 +393,27 @@ def call_llm(prompt: str) -> str:
     if not client:
         raise RuntimeError("GROQ_API_KEY not set")
 
+    _debug("[LLM] Calling Groq", {"model": MODEL_NAME, "timeout": LLM_TIMEOUT_SECONDS})
     response = client.chat.completions.create(
         model=MODEL_NAME,
         messages=[
-            {"role": "system", "content": "You are a precise Brightwheel onboarding triage assistant. Return valid JSON only. Never contradict the SLA in the draft reply. If priority is High, reply timeframe must be same business day. If priority is Critical, reply timeframe must be within 1 hour. If priority is Medium, reply timeframe must be within 24 hours. If priority is Low, reply timeframe must be within 48 hours."},
+            {
+                "role": "system",
+                "content": (
+                    "You are a precise Brightwheel onboarding triage assistant. "
+                    "Return valid JSON only. Never contradict the SLA in the draft reply. "
+                    "If priority is High, reply timeframe must be same business day. "
+                    "If priority is Critical, reply timeframe must be within 1 hour. "
+                    "If priority is Medium, reply timeframe must be within 24 hours. "
+                    "If priority is Low, reply timeframe must be within 48 hours."
+                ),
+            },
             {"role": "user", "content": prompt},
         ],
         temperature=0.1,
-        max_tokens=650,
+        max_tokens=1200,
     )
+    _debug("[LLM] Groq response received")
     return response.choices[0].message.content
 
 
@@ -418,7 +428,7 @@ def clean_json(raw: str) -> dict:
     return json.loads(raw[start:end + 1])
 
 # ---------------------------------------------------------------------------
-# Post-processing guardrails
+# Post-processing guardrails: NO rule_based_triage call here
 # ---------------------------------------------------------------------------
 
 def _is_hallucinated_instruction(draft: str) -> bool:
@@ -430,71 +440,92 @@ def _is_hallucinated_instruction(draft: str) -> bool:
 
 
 def post_process(result: dict, message_body: str, sender_name: str = "there") -> dict:
-    """Combines LLM nuance with deterministic routing, safety, and reply controls."""
-    rules = rule_based_triage(message_body, sender_name)
+    """
+    Groq-first post-processing.
 
-    # Normalize invalid model labels.
-    if result.get("category") not in VALID_CATEGORIES:
-        result["category"] = rules["category"]
-    if result.get("priority") not in VALID_PRIORITIES:
-        result["priority"] = rules["priority"]
+    Important: this function does NOT call rule_based_triage().
+    It only normalizes the LLM output, enforces routing consistency,
+    and repairs unsafe draft replies. Rule-based triage is used only if
+    Groq fails, JSON parsing fails, or USE_AI=false.
+    """
+    text = message_body.lower()
 
-    # Rules win on high-stakes and deterministic cases.
-    if (
-        rules["priority"] == "Critical"
-        or rules["category"] in ("Wrong Team", "Privacy & Security", "Urgent Escalation")
-        or rules["confidence"] < 0.4
-    ):
-        for key in (
-            "category", "secondary_category", "priority", "sla", "owner",
-            "supporting_team", "escalation_type", "needs_human_review",
-            "human_review_reason", "safe_mode",
-        ):
-            result[key] = rules[key]
+    category = result.get("category") if result.get("category") in VALID_CATEGORIES else "Setup & Onboarding"
+    priority = result.get("priority") if result.get("priority") in VALID_PRIORITIES else "Medium"
 
-    # Use deterministic owner/supporting_team to avoid inconsistent routing.
-    category = result.get("category", rules["category"])
-    priority = result.get("priority", rules["priority"])
-    owner = "Escalation Manager" if priority == "Critical" else rules.get("owner") or DEFAULT_OWNER_BY_CATEGORY.get(category, "Onboarding Specialist")
-    result["owner"] = rules["owner"]
-    result["supporting_team"] = get_supporting_team(category, priority, owner)
-    result["sla"] = SLA_BY_PRIORITY.get(priority, rules["sla"])
-    result["escalation_type"] = get_escalation_type(category, priority, message_body.lower())
-
-    # Fill missing explainability and safety fields.
-    result.setdefault("secondary_category", rules["secondary_category"])
-    result.setdefault("issues_detected", rules["issues_detected"])
-    result.setdefault("confidence", rules["confidence"])
-
+    # Small deterministic safety corrections without using the full fallback engine.
+    if category == "Privacy & Security":
+        priority = "Critical"
     if priority == "Critical":
-        result["needs_human_review"] = True
-        result["human_review_reason"] = result.get("human_review_reason") or "Critical priority: requires immediate human oversight before action."
-        result["safe_mode"] = "Draft only - do not auto-send"
+        owner = "Escalation Manager"
+    elif category == "Wrong Team":
+        owner = result.get("owner") if result.get("owner") in ("Sales Team", "HR Team") else "Sales Team"
     else:
-        result["needs_human_review"] = bool(result.get("needs_human_review", rules["needs_human_review"]))
-        result["safe_mode"] = "Draft only - do not auto-send" if result["needs_human_review"] else "Auto-route approved"
-        result.setdefault("human_review_reason", rules["human_review_reason"])
+        owner = result.get("owner") or DEFAULT_OWNER_BY_CATEGORY.get(category) or "Onboarding Specialist"
+
+    supporting_team = get_supporting_team(category, priority, owner)
+    sla = SLA_BY_PRIORITY[priority]
+
+    secondary_category = result.get("secondary_category")
+    if secondary_category not in VALID_CATEGORIES:
+        secondary_category = None
+
+    confidence = result.get("confidence", 0.75)
+    try:
+        confidence = float(confidence)
+    except (TypeError, ValueError):
+        confidence = 0.75
+
+    needs_human_review = bool(result.get("needs_human_review", False))
+    human_review_reason = result.get("human_review_reason")
+    if priority == "Critical":
+        needs_human_review = True
+        human_review_reason = human_review_reason or "Critical priority: requires immediate human oversight before action."
+
+    safe_mode = "Draft only - do not auto-send" if needs_human_review else "Auto-route approved"
+
+    issues_detected = result.get("issues_detected")
+    if not isinstance(issues_detected, list) or not issues_detected:
+        issues_detected = detect_issues(message_body)
 
     draft = result.get("draft_reply", "") or ""
-    if (
+    bad_reply = (
         not draft.strip()
-        or len(draft.split()) > 90
+        or len(draft.split()) > 120
         or _is_hallucinated_instruction(draft)
-        or (priority == "Critical" and "24 hours" in draft.lower())
         or (priority == "Critical" and "1 hour" not in draft.lower())
-        or (priority == "High" and "2 business days" in draft.lower())
-        or (priority == "High" and "48 hours" in draft.lower())
+        or (priority == "Critical" and "24 hours" in draft.lower())
+        or (priority == "High" and ("2 business days" in draft.lower() or "48 hours" in draft.lower()))
+    )
 
-    ):
-        result["draft_reply"] = make_reply(category, priority, owner, sender_name, result.get("supporting_team"))
+    if bad_reply:
+        draft = make_reply(category, priority, owner, sender_name, supporting_team)
 
-    result["pii_masked"] = True
-    result["original_sender"] = sender_name
-    result["weekly_impact"] = None
-    result["automation_mode"] = "AI-assisted"
-    result.pop("fallback_error", None)
-    result.pop("error", None)
-    return result
+    return {
+        "category": category,
+        "secondary_category": secondary_category,
+        "priority": priority,
+        "sla": sla,
+        "owner": owner,
+        "supporting_team": supporting_team,
+        "escalation_type": result.get("escalation_type") or get_escalation_type(category, priority, text),
+        "confidence": confidence,
+        "needs_human_review": needs_human_review,
+        "human_review_reason": human_review_reason,
+        "safe_mode": safe_mode,
+        "draft_reply": draft,
+        "issues_detected": issues_detected,
+        "weekly_impact": None,
+        "pii_masked": True,
+        "original_sender": sender_name,
+        "automation_mode": "AI-assisted",
+        "llm_used": True,
+        "model": MODEL_NAME,
+    }
+
+# ---------------------------------------------------------------------------
+# Follow-up detection helper
+# ---------------------------------------------------------------------------
 
 def detect_followup(message_body: str, sender_email: str, messages: list) -> dict | None:
     """
@@ -518,24 +549,38 @@ def detect_followup(message_body: str, sender_email: str, messages: list) -> dic
         "original_message_id": str(previous[0].get("message_id", "")),
         "original_subject": str(previous[0].get("subject", ""))
     }
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
 def triage_message(message_body: str, sender_name: str = "there", sender_email: str = "") -> dict:
     """Main function called by Flask: raw message -> structured triage dict."""
+    start = time.perf_counter()
+
+    _debug("[TRIAGE] start", {"USE_AI": USE_AI, "key_exists": bool(GROQ_API_KEY), "model": MODEL_NAME})
+
     if not USE_AI:
-        return rule_based_triage(message_body, sender_name)
+        result = rule_based_triage(message_body, sender_name, error=None)
+        result["latency_ms"] = round((time.perf_counter() - start) * 1000)
+        return result
 
     scrubbed = scrub_pii(message_body)
     prompt = f"{TAXONOMY}\n\nMessage:\n{scrubbed}\n\nReturn ONLY valid JSON."
 
-    start = time.perf_counter()
     try:
         raw = call_llm(prompt)
-        result = post_process(clean_json(raw), message_body, sender_name)
+        _debug("[LLM] raw response:", raw)
+        parsed = clean_json(raw)
+        _debug("[LLM] parsed JSON keys:", list(parsed.keys()))
+        result = post_process(parsed, message_body, sender_name)
     except Exception as exc:
+        _debug("[LLM] failed; using fallback:", repr(exc))
         result = rule_based_triage(message_body, sender_name, error=str(exc))
+        if DEBUG_LLM:
+            result["debug_error"] = str(exc)
+            if "raw" in locals():
+                result["raw_llm_response"] = raw
 
     result["latency_ms"] = round((time.perf_counter() - start) * 1000)
     return result
