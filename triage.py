@@ -456,6 +456,12 @@ def post_process(result: dict, message_body: str, sender_name: str = "there") ->
     # Small deterministic safety corrections without using the full fallback engine.
     if category == "Privacy & Security":
         priority = "Critical"
+    # Override: no contact + no setup + imminent launch = always Urgent Escalation Critical
+    if (_contains(text, r"school starts|opens tomorrow|open in 3 days|starts monday|starts this monday")
+            and _contains(text, r"no one has contacted|haven't heard|not set up|no setup|nothing is set up")):
+        category = "Urgent Escalation"
+        priority = "Critical"
+        owner = "Escalation Manager"
     if priority == "Critical":
         owner = "Escalation Manager"
     elif category == "Wrong Team":
